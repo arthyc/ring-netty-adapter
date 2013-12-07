@@ -112,8 +112,6 @@
       (if-not keep-alive (.addListener last-content-future ChannelFutureListener/CLOSE)))))
 
 (defn write-response [ctx zerocopy keep-alive {:keys [status headers body]}]
-  ;(println (type body))
-  ;(println headers)
   (let [netty-response (DefaultHttpResponse. HttpVersion/HTTP_1_1 (HttpResponseStatus/valueOf status))]
     (set-headers netty-response headers)
     (cond (string? body)

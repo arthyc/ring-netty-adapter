@@ -15,23 +15,13 @@
 	   
 (defn- make-handler [handler zerocopy]
   (proxy [SimpleChannelInboundHandler] [FullHttpRequest]
-    ;(channelReadComplete [ctx]
-    ;  (.flush ctx))
-    (channelRead0 [ctx msg]
-      (cond (instance? FullHttpRequest msg)
+    (channelRead0 [ctx ^FullHttpRequest msg]
         (let [request-map (build-request-map ctx ^FullHttpRequest msg)
               ring-response (handler request-map)]
-          (.println System/out request-map)
           (when ring-response
-            (write-response ctx zerocopy (request-map :keep-alive) ring-response)))
-        (instance? WebSocketFrame msg)
-        (println "websocket frame")
-      ))
+            (write-response ctx zerocopy (request-map :keep-alive) ring-response))))
     (exceptionCaught [ctx cause]
-      ;(print "----" (type cause))
       (-> cause .printStackTrace)
-      ;(print "----" (-> cause .printStackTrace))
-      ;(.printStackTrace cause)
       (-> ctx  .close))))
 
 (defn- make-pipeline [options handler ch]
