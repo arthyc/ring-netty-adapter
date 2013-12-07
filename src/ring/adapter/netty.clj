@@ -1,59 +1,78 @@
 (ns ring.adapter.netty
   (:use ring.adapter.plumbing)
   (:import (java.net InetSocketAddress)
-	   (java.util.concurrent Executors)
-	   (java.io ByteArrayInputStream)
-	   (org.jboss.netty.bootstrap ServerBootstrap)
-	   (org.jboss.netty.channel ChannelPipeline ChannelPipelineFactory Channels
-				    SimpleChannelUpstreamHandler)
-	   (org.jboss.netty.channel.socket.nio NioServerSocketChannelFactory)
-	   (org.jboss.netty.handler.stream ChunkedWriteHandler)
-	   (org.jboss.netty.handler.codec.http HttpContentCompressor HttpRequestDecoder
-					       HttpResponseEncoder HttpChunkAggregator)))
+           (java.util.concurrent Executors)
+           (java.io ByteArrayInputStream)
+           (io.netty.bootstrap ServerBootstrap)
+           (io.netty.channel ChannelFutureListener ChannelPipeline ChannelInitializer ChannelOption 
+                             SimpleChannelInboundHandler)
+           (io.netty.channel.nio NioEventLoopGroup)
+           (io.netty.channel.socket.nio NioServerSocketChannel)
+           (io.netty.handler.stream ChunkedWriteHandler)
+           (io.netty.handler.codec.http HttpContentCompressor HttpRequestDecoder 
+                                        HttpResponseEncoder HttpObjectAggregator FullHttpRequest)
+    ))
 	   
 (defn- make-handler [handler zerocopy]
-  (proxy [SimpleChannelUpstreamHandler] []
-    (messageReceived [ctx evt]
-		     (let [request-map (build-request-map ctx (.getMessage evt))
-			   ring-response (handler request-map)]
-		       (when ring-response
-			 (write-response ctx zerocopy (request-map :keep-alive) ring-response))))
-    (exceptionCaught [ctx evt]
-		     ;(-> evt .getCause .printStackTrace)
-		     (-> evt .getChannel .close))))
+  (proxy [SimpleChannelInboundHandler] [FullHttpRequest]
+    ;(channelReadComplete [ctx]
+    ;  (.flush ctx))
+    (channelRead0 [ctx msg]
+      (cond (instance? FullHttpRequest msg)
+        (let [request-map (build-request-map ctx ^FullHttpRequest msg)
+              ring-response (handler request-map)]
+          (.println System/out request-map)
+          (when ring-response
+            (write-response ctx zerocopy (request-map :keep-alive) ring-response)))
+        (instance? WebSocketFrame msg)
+        (println "websocket frame")
+      ))
+    (exceptionCaught [ctx cause]
+      ;(print "----" (type cause))
+      (-> cause .printStackTrace)
+      ;(print "----" (-> cause .printStackTrace))
+      ;(.printStackTrace cause)
+      (-> ctx  .close))))
 
-(defn- make-pipeline [options handler]
-  (let [pipeline (Channels/pipeline)
-	pipeline (doto pipeline
+(defn- make-pipeline [options handler ch]
+  (let [pipeline (.pipeline ch)]
+    (doto pipeline
 		  (.addLast "decoder" (HttpRequestDecoder.))
-		  (.addLast "aggregator" (HttpChunkAggregator. 65636))
+		  (.addLast "aggregator" (HttpObjectAggregator. 65636))
 		  (.addLast "encoder" (HttpResponseEncoder.))
-                  (.addLast "chunkedWriter" (ChunkedWriteHandler.))
+      (.addLast "chunkedWriter" (ChunkedWriteHandler.))
 		  ;(.addLast "deflater" (HttpContentCompressor.))
-		  (.addLast "handler" (make-handler handler (or (:zerocopy options) false))))]
+		  (.addLast "handler" (make-handler handler (or (:zerocopy options) false))))
     pipeline))
 
-(defn- pipeline-factory [options handler]
-  (proxy [ChannelPipelineFactory] []
-	 (getPipeline [] (make-pipeline options handler))))
-	
-(defn- create-server [options handler]
-  (let [bootstrap (ServerBootstrap. (NioServerSocketChannelFactory.
-				     (Executors/newCachedThreadPool)
-				     (Executors/newCachedThreadPool)))
-	bootstrap (doto bootstrap
-		    (.setPipelineFactory (pipeline-factory options handler))
-		    (.setOption "child.tcpNoDelay" true)
-		    (.setOption "child.keepAlive" true))]
+(defn- init-channel [options handler]
+  (proxy [ChannelInitializer] []
+    (initChannel [ch] (make-pipeline options handler ch))))
+
+(defn- create-server [options handler] 
+  (let [bootstrap (ServerBootstrap.)]
+    (doto bootstrap
+      (.channel NioServerSocketChannel)
+      (.childHandler (init-channel options handler))
+      (.option ChannelOption/SO_BACKLOG (int 100))
+      (.childOption ChannelOption/TCP_NODELAY  true)
+      (.childOption ChannelOption/SO_KEEPALIVE true))
     bootstrap))
 	
 (defn- bind [bs port]
   (.bind bs (InetSocketAddress. port)))
 
 (defn run-netty [handler options]
-  (let [bootstrap (create-server options handler)
-	port (options :port 80)]
-    (println "Running server on port:" port)
-    (bind bootstrap port)))
+  (let [boss-group (NioEventLoopGroup.)
+        work-group (NioEventLoopGroup.)
+        bootstrap (create-server options handler)port (options :port 80)]
+    (try
+      (.group bootstrap boss-group work-group)
+      (println "Running server on port:" port)
+      (-> bootstrap (bind port) .sync 
+        .channel .closeFuture .sync)
+      (catch Exception e (print (.getMessage e)))
+      (finally (.shutdownGracefully boss-group)
+               (.shutdownGracefully work-group)))))
 
 		    
